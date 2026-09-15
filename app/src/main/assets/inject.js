@@ -97,6 +97,8 @@
         for (var i = 0; i < events.length; i++) {
             (function (ev) {
                 a.addEventListener(ev, function () {
+                    // 真放出声音了：自动播放的重试全部作废，不再跟用户的手打架
+                    if (ev === 'playing') { window.__gbDidPlay = true; }
                     push(true);
                     if (ev === 'ended') {
                         try { GB.onEnded(); } catch (e) { }
@@ -220,9 +222,10 @@
         for (var i = 0; i < delays.length; i++) {
             (function (delay) {
                 setTimeout(function () {
+                    if (window.__gbDidPlay) { return; }    // 已经放过一次了，剩下的重试全部作废
                     var a = player();
                     if (!a) { return; }
-                    if (!a.paused && !a.ended) { push(true); return; }   // 已经在放，收工
+                    if (!a.paused && !a.ended) { window.__gbDidPlay = true; push(true); return; }
                     if (a.currentSrc || a.src) {
                         // 直链已经解析出来了：直接播。
                         // 这一步绝不能去点按钮 —— 站点那颗按钮是 toggle，会反手把播放关掉
