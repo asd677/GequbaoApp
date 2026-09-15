@@ -61,7 +61,7 @@
             url = a.currentSrc || a.src || '';
             if (isFinite(a.currentTime) && a.currentTime > 0) { pos = Math.round(a.currentTime); }
             if (isFinite(a.duration) && a.duration > 0) { dur = Math.round(a.duration); }
-            playing = !a.paused && !a.ended && a.currentTime > 0;
+            playing = !a.paused && !a.ended;
         }
         if (!dur && d.mp3_duration) { dur = toSeconds(d.mp3_duration); }
 
@@ -245,7 +245,7 @@
 
         // 站点是整页刷新式导航，但播放器元素可能被复用/重建，这里低频兜底补钩子
         if (hookTimer) { clearInterval(hookTimer); }
-        hookTimer = setInterval(function () { hook(); applyLook(); }, 3000);
+        hookTimer = setInterval(function () { hook(); applyLook(); reportSong(); }, 3000);
     }
 
     window.__gbApply = function () { applyLook(); push(true); };

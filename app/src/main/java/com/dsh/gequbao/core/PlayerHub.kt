@@ -108,6 +108,10 @@ object PlayerHub {
         val s = runCatching { gson.fromJson(json, JsState::class.java) }.getOrNull() ?: return
         main.post {
             val prev = _state.value.song
+            // 旧页面在跳转过程中还可能补发 emptied/pause 之类的事件，
+            // 带着「上一首」的身份和不播状态跑过来；这种恬恬地丢掉，否则迷你条会回跳一下
+            val webSongId = Song.fromUrl(currentWebUrl)
+            if (!s.playing && s.songId.isNotBlank() && webSongId != null && s.songId != webSongId) return@post
             // 首页/榜单/搜索页也会上报，那些页面拿不到歌曲身份（没有 songId 也没有音频地址），
             // 这时只能当「播放状态」看，绝不能把 document.title 当成新歌写进去
             val identified = s.songId.isNotBlank() || s.url.isNotBlank()
@@ -148,7 +152,7 @@ object PlayerHub {
         main.post {
             if (m.title.isBlank()) return@post
             val prev = _state.value.song
-            if (prev?.id == m.id && prev.title == m.title && prev.cover.isNotBlank()) return@post
+            if (prev != null && prev.id == m.id && prev.title == m.title && prev.cover == m.cover) return@post
             _state.value = _state.value.copy(
                 song = Song(
                     id = m.id,
