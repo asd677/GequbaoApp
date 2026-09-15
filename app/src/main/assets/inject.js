@@ -166,10 +166,6 @@
 
     /* ---------------------------------------------------------------- 外观增强 */
 
-    function readCfg() {
-        try { return JSON.parse(GB.uiConfig()) || {}; } catch (e) { return {}; }
-    }
-
     var CSS = [
         /* 夜间模式兜底：WebView 自带的自动深色不可用时才走这里（反色 + 图片再反回来） */
         '.gb-dark{filter:invert(1) hue-rotate(180deg);background:#101014;}',
@@ -179,10 +175,18 @@
         '.gb-hidefoot footer,.gb-hidefoot .footer-modern{display:none !important;}'
     ].join('\n');
 
+    var lastLook = '';
+
     function applyLook() {
-        var c = readCfg();
+        var raw = '';
+        try { raw = GB.uiConfig(); } catch (e) { return; }
+        // 配置没变就不碰 DOM：这个函数每 3 秒会被叫一次，别让站点白白重排
+        if (raw === lastLook) { return; }
+        var c = {};
+        try { c = JSON.parse(raw) || {}; } catch (e) { return; }
         var html = document.documentElement;
         if (!html || !document.body) { return; }
+        lastLook = raw;
 
         var style = $('gb-style');
         if (!style) {
