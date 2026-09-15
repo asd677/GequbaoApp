@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">歌曲宝</string>
+    <string name="notification_channel_name">正在播放</string>
+    <string name="notification_channel_desc">显示当前歌曲并控制播放</string>
+    <string name="download_channel_name">下载</string>
+    <string name="download_channel_desc">歌曲下载进度</string>
+</resources>
