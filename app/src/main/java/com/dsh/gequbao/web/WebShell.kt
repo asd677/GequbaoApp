@@ -122,7 +122,7 @@ class WebShell(private val context: Context) {
 
             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                 _progress.value = 5
-                PlayerHub.setWebUrl(url.orEmpty())
+                PlayerHub.onPageStarted(url.orEmpty())
             }
 
             override fun onPageFinished(view: WebView, url: String?) {

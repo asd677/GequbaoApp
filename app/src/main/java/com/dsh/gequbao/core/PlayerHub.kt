@@ -76,6 +76,16 @@ object PlayerHub {
         currentWebUrl = url
     }
 
+    /** 新页面开始加载：如果跳离了正在播放的那首歌的页面，网页里的 <audio> 已经随页面一起没了 */
+    fun onPageStarted(url: String) {
+        setWebUrl(url)
+        val playing = _state.value.song ?: return
+        val newId = Song.fromUrl(url)
+        if (_state.value.playing && newId != playing.id) {
+            _state.value = _state.value.copy(playing = false)
+        }
+    }
+
     // ------------------------------------------------------------ 状态刷新
 
     private fun refresh() {

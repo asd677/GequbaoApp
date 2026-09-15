@@ -121,8 +121,8 @@
             if (!a) { return; }
             var hasSrc = !!(a.currentSrc || a.src);
             if (!hasSrc) {
-                // 站点要先点一下播放按钮才会去解析播放地址
-                var btn = $('player-toggle-btn') || $('main-play-btn');
+                // 站点要先点一下播放按钮才会去解析播放地址（和真人操作走同一条路）
+                var btn = $('player-toggle-btn') || $('btn-main-play');
                 if (btn) { btn.click(); }
             } else {
                 var p = a.play();
@@ -207,18 +207,35 @@
 
     /* ---------------------------------------------------------------- 初始化 */
 
+    /** 队列跳页 / 设置里的「自动播放」都是这一套：模拟真人点一下播放键，一步到位 */
     function autoplayIfNeeded() {
         if (!songId()) { return; }        // 非歌曲页不谈自动播放
         var want = false;
         try { want = !!GB.consumeAutoplay(); } catch (e) { want = false; }
         if (!want) { return; }
-        setTimeout(function () { window.__gb.play(); }, 600);
-        setTimeout(function () {
-            var a = player();
-            if (a && a.paused) { window.__gb.play(); }
-            push(true);
-        }, 2200);
-        setTimeout(function () { push(true); }, 4000);
+
+        // 站点的 togglePlay() 是幂等的：没拿到直链时点它只会触发「解析播放地址」，
+        // 拿到直链后 pendingPlay 会自己接着播；所以分几次重试是安全的。
+        var delays = [300, 900, 1600, 2600, 4000, 6000];
+        for (var i = 0; i < delays.length; i++) {
+            (function (delay) {
+                setTimeout(function () {
+                    var a = player();
+                    if (!a) { return; }
+                    if (!a.paused && !a.ended) { push(true); return; }   // 已经在放，收工
+                    if (a.currentSrc || a.src) {
+                        // 直链已经解析出来了：直接播。
+                        // 这一步绝不能去点按钮 —— 站点那颗按钮是 toggle，会反手把播放关掉
+                        var p = a.play();
+                        if (p && p.catch) { p.catch(function () { }); }
+                    } else {
+                        var btn = $('player-toggle-btn') || $('btn-main-play');
+                        if (btn) { btn.click(); }
+                    }
+                    push(true);
+                }, delay);
+            })(delays[i]);
+        }
     }
 
     function reportSong() {

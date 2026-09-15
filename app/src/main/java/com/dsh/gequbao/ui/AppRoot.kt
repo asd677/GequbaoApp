@@ -135,12 +135,17 @@ fun AppRoot(shell: WebShell, activity: MainActivity) {
         activity.window.navigationBarColor = if (settings.dark) 0xFF101114.toInt() else 0xFFFFFFFF.toInt()
     }
 
-    // 切换 tab：网页 tab 才动 WebView，避免无谓刷新
-    LaunchedEffect(tabIndex) {
-        if (tab.isWeb) {
-            lastWebTab = tabIndex
-            val url = tab.url!!
-            if (shell.currentUrl() != url) shell.load(url)
+    // 切 tab **不能**写成 LaunchedEffect(tabIndex) 里 load ——
+    // 「从音乐库点一首歌」也会改 tabIndex，那样刚跳过去的歌曲页会立刻被 tab 首页覆盖掉，
+    // 结果就是「点歌总是先回首页」。只有用户真的去点底部导航时才动 WebView。
+    fun tapTab(i: Int) {
+        // 重复点当前 tab 什么都不做：否则会把刚跳过来、正在放歌的歌曲页顶掉
+        if (i == tabIndex) return
+        val target = MainTab.entries[i]
+        tabIndex = i
+        if (target.isWeb) {
+            lastWebTab = i
+            shell.load(target.url!!)
         }
     }
 
@@ -184,7 +189,7 @@ fun AppRoot(shell: WebShell, activity: MainActivity) {
                             MainTab.entries.forEachIndexed { i, t ->
                                 NavigationBarItem(
                                     selected = tabIndex == i,
-                                    onClick = { tabIndex = i },
+                                    onClick = { tapTab(i) },
                                     icon = { Icon(t.icon, contentDescription = t.label) },
                                     label = { Text(t.label) }
                                 )
@@ -216,7 +221,13 @@ fun AppRoot(shell: WebShell, activity: MainActivity) {
                             when (tab) {
                                 MainTab.Library -> LibraryScreen(
                                     store = store,
-                                    onPlayAll = { list, i, name -> PlayerHub.playAll(list, i, name) },
+                                    onPlayAll = { list, i, name ->
+                                        val song = list.getOrNull(i)
+                                        PlayerHub.playAll(list, i, name)
+                                        // 「点歌 → 跳过去看歌曲页 → 自动开嗓」一步到位。
+                                        // 这里只是切 tab（不再触发任何 load），跳转由 PlayerHub 自己驱动
+                                        if (song != null) tabIndex = lastWebTab
+                                    },
                                     onOpenInWeb = { song ->
                                         tabIndex = lastWebTab
                                         shell.load(song.page())
