@@ -80,6 +80,10 @@ dependencies {
     // 通知栏媒体控制
     implementation("androidx.media:media:1.7.0")
 
+    // 原生播放器：网页一旦被用户翻走，播放交接给它（还在放的那首能接着放）
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-common:1.4.1")
+
     // 图片加载
     implementation("io.coil-kt:coil-compose:2.6.0")
 
@@ -87,4 +91,6 @@ dependencies {
     implementation("com.google.code.gson:gson:2.11.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    testImplementation("junit:junit:4.13.2")
 }

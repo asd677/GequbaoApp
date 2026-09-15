@@ -64,6 +64,7 @@ class PlaybackService : Service() {
     }
 
     private lateinit var session: MediaSessionCompat
+    private lateinit var native: NativePlayer
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private var lastSongKey: String? = null
@@ -77,6 +78,21 @@ class PlaybackService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannel()
+
+        // 原生播放器：网页被用户翻走之后，接着响的就是它
+        native = NativePlayer(this).apply {
+            onProgress = { playing, pos, dur -> PlayerHub.onNativeProgress(playing, pos, dur) }
+            onEnded = { PlayerHub.onNativeEnded() }
+            onError = { msg -> PlayerHub.onNativeError(msg) }
+        }
+        PlayerHub.nativeAudio = object : PlayerHub.NativeAudio {
+            override fun play(url: String, startSec: Int) = native.play(url, startSec)
+            override fun resume() = native.resume()
+            override fun pause() = native.pause()
+            override fun stop() = native.stop()
+            override fun seekTo(sec: Int) = native.seekTo(sec)
+            override val positionSec: Int get() = native.positionSec
+        }
 
         session = MediaSessionCompat(this, "gequbao").apply {
             setCallback(object : MediaSessionCompat.Callback() {
@@ -131,8 +147,9 @@ class PlaybackService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
+        PlayerHub.nativeAudio = null
+        runCatching { native.release() }
         runCatching { session.isActive = false; session.release() }
-        scope.cancel()
         stopForegroundCompat()
         super.onDestroy()
     }

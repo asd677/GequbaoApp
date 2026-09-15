@@ -29,6 +29,10 @@ class JsBridge {
     @JavascriptInterface
     fun onEnded() = PlayerHub.onEnded()
 
+    /** 网页马上要出声了：原生那一份该让位了 */
+    @JavascriptInterface
+    fun onWillPlay() = PlayerHub.onWillPlay()
+
     @JavascriptInterface
     fun consumeAutoplay(): Boolean = PlayerHub.consumeAutoplay()
 

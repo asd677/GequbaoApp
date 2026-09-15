@@ -24,6 +24,11 @@
 
     function $(id) { return document.getElementById(id); }
 
+    /** 告诉原生：网页马上要出声了（原生播放器该让位了） */
+    function willPlay() {
+        try { GB.onWillPlay && GB.onWillPlay(); } catch (e) { }
+    }
+
     function player() { return $('custom-audio-player'); }
 
     function appData() { return window.appData || {}; }
@@ -122,6 +127,7 @@
             var a = player();
             if (!a) { return; }
             var hasSrc = !!(a.currentSrc || a.src);
+            willPlay();
             if (!hasSrc) {
                 // 站点要先点一下播放按钮才会去解析播放地址（和真人操作走同一条路）
                 var btn = $('player-toggle-btn') || $('btn-main-play');
@@ -140,6 +146,7 @@
         replay: function () {
             var a = player();
             if (!a) { return; }
+            willPlay();
             try { a.currentTime = 0; } catch (e) { }
             var p = a.play();
             if (p && p.catch) { p.catch(function () { }); }
@@ -226,6 +233,7 @@
                     var a = player();
                     if (!a) { return; }
                     if (!a.paused && !a.ended) { window.__gbDidPlay = true; push(true); return; }
+                    willPlay();
                     if (a.currentSrc || a.src) {
                         // 直链已经解析出来了：直接播。
                         // 这一步绝不能去点按钮 —— 站点那颗按钮是 toggle，会反手把播放关掉

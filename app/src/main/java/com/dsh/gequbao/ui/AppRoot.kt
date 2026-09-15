@@ -78,6 +78,7 @@ import com.dsh.gequbao.core.NowPlaying
 import com.dsh.gequbao.core.PlayerHub
 import com.dsh.gequbao.core.SITE
 import com.dsh.gequbao.core.Song
+import com.dsh.gequbao.core.Source
 import com.dsh.gequbao.web.WebShell
 
 /** 底部 4 个 tab：两个是网页，两个是原生。 */
@@ -342,6 +343,7 @@ private fun MiniPlayerBar(
                 Text(
                     buildString {
                         append(song.artist.ifBlank { "未知歌手" })
+                        if (now.source == Source.NATIVE) append("  ·  后台接管中")
                         if (now.queueSize > 0) append("  ·  ${now.queueName.ifBlank { "播放队列" }} ${now.queueIndex + 1}/${now.queueSize}")
                     },
                     style = MaterialTheme.typography.bodySmall,
@@ -498,34 +500,58 @@ private fun QueueSheet(
 
 // ------------------------------------------------------------------ 通用动作
 
-/** 下载：当前正在播的那首直接拿网页里的直链；其它歌先跳过去，让网页自己解析 */
+/**
+ * 下载。优先级：
+ *  1. 这首正在网页里放 → 直接问页面要地址（最准）
+ *  2. 本地已经存过它的直链 → 直接用
+ *  3. 都没有 → 用站点自己的接口现解析（不消耗页面导航，不会把用户从正在看的页面上拽走）
+ */
 private fun downloadSong(
     ctx: android.content.Context,
     shell: WebShell,
     song: Song,
     switchToWeb: () -> Unit
 ) {
-    val current = PlayerHub.currentSong()
-    if (current != null && current.key == song.key) {
-        shell.requestAudioUrls { src, dl ->
-            val url = dl.ifBlank { src }.ifBlank { song.audioUrl }
-            if (url.isBlank()) {
-                PlayerHub.toast("还没拿到下载地址，先在网页里点一下播放")
-                return@requestAudioUrls
-            }
-            val ok = DownloadHelper.enqueueAndRecord(
-                context = ctx,
-                url = url,
-                title = song.title,
-                artist = song.artist,
-                pageUrl = song.page()
-            )
-            PlayerHub.toast(if (ok) "开始下载：${song.title}" else "下载启动失败")
+    val now = PlayerHub.state.value
+    val current = now.song
+    val onItsWebPage = current != null && current.key == song.key &&
+        now.source == Source.WEB && Song.fromUrl(shell.currentUrl()) == song.id
+
+    fun enqueue(url: String) {
+        if (url.isBlank()) {
+            PlayerHub.toast("没拿到下载地址，先在网页里播一次这首")
+            return
         }
-    } else {
-        PlayerHub.toast("已打开歌曲页，点「下载歌曲」或先在网页里播放一次")
-        switchToWeb()
-        shell.load(song.page())
+        val ok = DownloadHelper.enqueueAndRecord(
+            context = ctx,
+            url = url,
+            title = song.title,
+            artist = song.artist,
+            pageUrl = song.page()
+        )
+        PlayerHub.toast(if (ok) "开始下载：${song.title}" else "下载启动失败")
+    }
+
+    if (onItsWebPage) {
+        shell.requestAudioUrls { src, dl -> enqueue(dl.ifBlank { src }.ifBlank { song.audioUrl }) }
+        return
+    }
+
+    if (song.audioUrl.isNotBlank()) {
+        enqueue(song.audioUrl)
+        return
+    }
+
+    PlayerHub.toast("正在解析下载地址…")
+    PlayerHub.resolveUrl(song) { result ->
+        result.onSuccess { res ->
+            // 顺手把直链回写给列表，下次就不用再解析了
+            enqueue(res.url)
+        }.onFailure { e ->
+            PlayerHub.toast("解析失败：${e.message}——去歌曲页点「下载歌曲」吧")
+            switchToWeb()
+            shell.load(song.page())
+        }
     }
 }
 

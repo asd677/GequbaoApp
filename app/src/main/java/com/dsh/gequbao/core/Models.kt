@@ -3,6 +3,15 @@ package com.dsh.gequbao.core
 /** 站点根地址。所有页面/直链都基于它拼。 */
 const val SITE = "https://www.gequbao.com"
 
+/** 伪装成手机 Chrome：站点对桌面 UA 会走另一套排版（设置里的桌面版就是切到下面那个）。 */
+const val UA_MOBILE =
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) " +
+        "Chrome/120.0.0.0 Mobile Safari/537.36"
+
+const val UA_DESKTOP =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+        "Chrome/120.0.0.0 Safari/537.36"
+
 /**
  * 一首歌。字段全部来自网页注入脚本抓到的信息（window.appData / <audio>）或本地列表。
  *
@@ -72,12 +81,16 @@ enum class QueueMode(val label: String) {
     SEQ("顺序"), ONE("单曲"), SHUFFLE("随机");
 }
 
+/** 声音到底是谁在放：网页里的 <audio>，还是交接给原生 ExoPlayer 之后。 */
+enum class Source { WEB, NATIVE }
+
 /** 当前播放状态，UI 与通知栏共用。 */
 data class NowPlaying(
     val song: Song? = null,
     val playing: Boolean = false,
     val position: Int = 0,
     val duration: Int = 0,
+    val source: Source = Source.WEB,
     val queueName: String = "",
     val queueSize: Int = 0,
     val queueIndex: Int = -1,

@@ -7,21 +7,29 @@ import android.util.Log
 import android.widget.Toast
 import com.google.gson.Gson
 import com.dsh.gequbao.player.PlaybackService
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.random.Random
 
 /**
- * 播放中枢：网页里的 <audio> 是唯一播放器，这里只做三件事
- *  1. 把网页上报的状态（歌名/歌手/进度/是否在播）翻译成 [NowPlaying] 给 UI 和通知栏；
- *  2. 反向把「播放/暂停/上一首/下一首/跳转」翻译成注入脚本能懂的 JS；
- *  3. 维护原生播放队列（收藏 / 歌单顺序连播就是这么实现的）。
+ * 播放中枢。声音有两个可能的出处，由 [Source] 标明：
  *
- * 为什么队列要放原生：站点自己不知道我们的收藏和歌单。
- * 一首放完后由网页上报 ended，这里决定下一首是谁、然后让 WebView 跳到那首歌的详情页，
- * 并让注入脚本自动点播放 —— 于是「连续播放自己的歌单」就成立了。
+ *  - **[Source.WEB]**：网页里的 `<audio>` 在响（用户在歌曲页上，能看到歌词和进度）；
+ *  - **[Source.NATIVE]**：用户一边听一边去翻别的页面，页面一换 `<audio>` 就随页面一起没了，
+ *    所以这时把直链和进度交接给原生 ExoPlayer（[NativeAudio]），声音接着响，页面随便翻。
+ *
+ * 交接的触发点是 [onPageStarted]：只要「正在放 + 新页面不是这首歌」就接管；
+ * 反过来，网页一旦要出声（注入脚本会先喊 [onWillPlay]），原生立刻让位，
+ * 并把进度交给网页，做到「接着听」而不是「从头再来」。
+ *
+ * 队列本身也在这里：站点不知道我们的收藏和歌单，所以放完一首由这里决定下一首是谁 ——
+ * 原生模式直接用站点自己的播放接口解析直链（[GbResolver]），不用把用户的页面拽走。
  */
 object PlayerHub {
 
@@ -30,6 +38,32 @@ object PlayerHub {
     private lateinit var app: Context
     private val gson = Gson()
     private val main = Handler(Looper.getMainLooper())
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /** 原生播放器的控制口子，由 PlaybackService 装配 */
+    interface NativeAudio {
+        fun play(url: String, startSec: Int)
+        fun resume()
+        fun pause()
+        fun stop()
+        fun seekTo(sec: Int)
+        val positionSec: Int
+    }
+
+    @Volatile
+    var nativeAudio: NativeAudio? = null
+
+    /** 当前声音是谁在放（只在主线程读写） */
+    private var source = Source.WEB
+
+    /** 我们自己发起的跳页（切歌）：这种跳页不做交接，旧的直接停 */
+    private var suppressHandoff = false
+
+    /** 原生让位给网页时，要把播放进度交给网页，别让用户从头听一遍 */
+    private var resumeAt = 0
+    private var resumeKey = ""
+    private var nativeErrorStreak = 0
+    private var handoffAttempts = 0
 
     /** WebView 执行 JS 的入口，由 MainActivity 装配 */
     @Volatile
@@ -76,14 +110,71 @@ object PlayerHub {
         currentWebUrl = url
     }
 
-    /** 新页面开始加载：如果跳离了正在播放的那首歌的页面，网页里的 <audio> 已经随页面一起没了 */
+    /** 新页面开始加载 */
     fun onPageStarted(url: String) {
         setWebUrl(url)
-        val playing = _state.value.song ?: return
-        val newId = Song.fromUrl(url)
-        if (_state.value.playing && newId != playing.id) {
-            _state.value = _state.value.copy(playing = false)
+        main.post {
+            val st = _state.value
+            val song = st.song ?: return@post
+            val newId = Song.fromUrl(url)
+
+            // 还在同一首歌的页面（刷新、锚点）什么都不动
+            if (newId != null && newId == song.id) return@post
+
+            val deliberate = suppressHandoff
+            suppressHandoff = false
+
+            // 我们自己要切歌：旧的停掉，接下来的交给新页面去放
+            if (deliberate) {
+                if (source == Source.NATIVE) {
+                    nativeAudio?.stop()
+                    setSource(Source.WEB)
+                }
+                if (st.playing) _state.value = _state.value.copy(playing = false)
+                return@post
+            }
+
+            // 本来就交给原生在放了：用户继续翻就好，什么都不用做
+            if (source == Source.NATIVE) return@post
+
+            // 网页没在放：没有交接的余地
+            if (!st.playing) return@post
+
+            // 没拿到直链：接不了
+            if (song.audioUrl.isBlank()) {
+                _state.value = _state.value.copy(playing = false)
+                return@post
+            }
+
+            handoffAttempts = 0
+            handoff()
         }
+    }
+
+    /** 把当前正在放的那首交给原生播放器，从当前进度接着放 */
+    private fun handoff() {
+        val st = _state.value
+        val song = st.song ?: return
+        val audio = nativeAudio
+        if (audio == null) {
+            if (handoffAttempts++ < 4) {
+                // 前台服务可能刚被拉起、ExoPlayer 还没就绪，拉一下再试
+                PlaybackService.ensureRunning(app)
+                main.postDelayed({ if (source == Source.WEB && _state.value.playing) handoff() }, 400)
+            } else {
+                _state.value = _state.value.copy(playing = false)
+            }
+            return
+        }
+        if (song.audioUrl.isBlank()) {
+            _state.value = _state.value.copy(playing = false)
+            return
+        }
+        audio.play(song.audioUrl, st.position)
+        nativeErrorStreak = 0
+        setSource(Source.NATIVE)
+        _state.value = _state.value.copy(playing = true)
+        toast("已交给后台继续放《${song.title}》，你可以接着翻")
     }
 
     // ------------------------------------------------------------ 状态刷新
@@ -94,11 +185,17 @@ object PlayerHub {
             playing = _state.value.playing,
             position = _state.value.position,
             duration = _state.value.duration,
+            source = source,
             queueName = queueName.value,
             queueSize = queue.value.size,
             queueIndex = queueIndex.value,
             queueMode = queueMode.value
         )
+    }
+
+    private fun setSource(s: Source) {
+        source = s
+        _state.value = _state.value.copy(source = s)
     }
 
     private fun run(js: String) {
@@ -117,6 +214,9 @@ object PlayerHub {
     fun onJsState(json: String) {
         val s = runCatching { gson.fromJson(json, JsState::class.java) }.getOrNull() ?: return
         main.post {
+            // 原生正在放的时候，网页那边的「没在放」全是噪音（原页面早随跳转销毁了），
+            // 状态一律以原生播放器为准；只有「网页真的出声了」才需要处理
+            if (source == Source.NATIVE && !s.playing) return@post
             val prev = _state.value.song
             // 旧页面在跳转过程中还可能补发 emptied/pause 之类的事件，
             // 带着「上一首」的身份和不播状态跑过来；这种恬恬地丢掉，否则迷你条会回跳一下
@@ -149,9 +249,24 @@ object PlayerHub {
                 duration = if (s.duration > 0) s.duration else _state.value.duration
             )
             if (s.playing) {
+                // 网页开始出声了：原生那一份立刻让位（onWillPlay 一般已经先做过，这里兜底）
+                if (source == Source.NATIVE) {
+                    nativeAudio?.stop()
+                    setSource(Source.WEB)
+                }
                 markHistory(song)
                 // 只在「从没播 -> 在播」这一刻拉起前台服务，避免后台反复 startForegroundService
                 if (!wasPlaying) PlaybackService.ensureRunning(app)
+                // 从原生交回网页时，把进度接上（仅当还是同一首歌）
+                val resume = resumeAt
+                if (resume > 3 && song.key == resumeKey) {
+                    resumeAt = 0
+                    resumeKey = ""
+                    if (s.position <= 1) run("window.__gb && __gb.seek($resume)")
+                } else if (resumeKey.isNotEmpty() && song.key != resumeKey) {
+                    resumeAt = 0
+                    resumeKey = ""
+                }
             }
         }
     }
@@ -161,6 +276,8 @@ object PlayerHub {
         val m = runCatching { gson.fromJson(json, JsMeta::class.java) }.getOrNull() ?: return
         main.post {
             if (m.title.isBlank()) return@post
+            // 原生正在放A、用户只是翻到B的页面看看：迷你条不能改成B
+            if (source == Source.NATIVE && _state.value.playing) return@post
             val prev = _state.value.song
             if (prev != null && prev.id == m.id && prev.title == m.title && prev.cover == m.cover) return@post
             _state.value = _state.value.copy(
@@ -223,15 +340,52 @@ object PlayerHub {
 
     // ------------------------------------------------------------ 原生 -> 网页
 
-    fun toggle() = run("window.__gb && __gb.toggle()")
-    fun play() = run("window.__gb && __gb.play()")
-    fun pause() = run("window.__gb && __gb.pause()")
-    fun seek(sec: Int) = run("window.__gb && __gb.seek($sec)")
+    /**
+     * 注入脚本说：网页马上要出声了（用户点了播放，或自动播放要开始）。
+     * 原生的那一份立刻让位，并把进度交给网页，做到「接着听」。
+     */
+    fun onWillPlay() {
+        main.post {
+            if (source != Source.NATIVE) return@post
+            resumeAt = nativeAudio?.positionSec ?: _state.value.position
+            // 进度只能交给「同一首歌」：用户点了另一首就必须从头放
+            resumeKey = _state.value.song?.key.orEmpty()
+            nativeAudio?.stop()
+            setSource(Source.WEB)
+        }
+    }
+
+    fun toggle() {
+        if (source == Source.NATIVE) {
+            if (_state.value.playing) nativeAudio?.pause() else nativeAudio?.resume()
+        } else {
+            run("window.__gb && __gb.toggle()")
+        }
+    }
+
+    fun play() {
+        if (source == Source.NATIVE) nativeAudio?.resume() else run("window.__gb && __gb.play()")
+    }
+
+    fun pause() {
+        if (source == Source.NATIVE) nativeAudio?.pause() else run("window.__gb && __gb.pause()")
+    }
+
+    fun seek(sec: Int) {
+        if (source == Source.NATIVE) nativeAudio?.seekTo(sec) else run("window.__gb && __gb.seek($sec)")
+    }
 
     fun nextSong() {
         val list = queue.value
         if (list.isEmpty()) {
             toast("还没有播放队列，去「音乐库」点一首吧")
+            return
+        }
+        if (source == Source.NATIVE) {
+            playNativeIndex(
+                if (queueMode.value == QueueMode.SHUFFLE) Random.nextInt(list.size)
+                else queueIndex.value + 1
+            )
             return
         }
         when (queueMode.value) {
@@ -246,16 +400,119 @@ object PlayerHub {
             toast("还没有播放队列")
             return
         }
-        if (queueMode.value == QueueMode.SHUFFLE) {
-            playIndex(Random.nextInt(list.size))
-            return
-        }
         // 播了 5 秒以上先回到本曲开头，符合大多数音乐 App 的习惯
         if (_state.value.position > 5) {
             seek(0)
             return
         }
+        if (source == Source.NATIVE) {
+            playNativeIndex(
+                if (queueMode.value == QueueMode.SHUFFLE) Random.nextInt(list.size)
+                else queueIndex.value - 1
+            )
+            return
+        }
+        if (queueMode.value == QueueMode.SHUFFLE) {
+            playIndex(Random.nextInt(list.size))
+            return
+        }
         playIndex(queueIndex.value - 1)
+    }
+
+    // ------------------------------------------------------------ 原生播放器的回调
+
+    fun onNativeProgress(playing: Boolean, position: Int, duration: Int) {
+        main.post {
+            if (source != Source.NATIVE) return@post
+            if (playing) nativeErrorStreak = 0
+            _state.value = _state.value.copy(
+                playing = playing,
+                position = position,
+                duration = if (duration > 0) duration else _state.value.duration
+            )
+        }
+    }
+
+    fun onNativeEnded() {
+        main.post {
+            if (source != Source.NATIVE) return@post
+            val list = queue.value
+            if (list.isEmpty()) {
+                _state.value = _state.value.copy(playing = false)
+                return@post
+            }
+            when (queueMode.value) {
+                QueueMode.ONE -> {
+                    nativeAudio?.seekTo(0)
+                    nativeAudio?.resume()
+                }
+                QueueMode.SHUFFLE -> playNativeIndex(Random.nextInt(list.size))
+                QueueMode.SEQ -> playNativeIndex(queueIndex.value + 1)
+            }
+        }
+    }
+
+    fun onNativeError(msg: String) {
+        main.post {
+            if (source != Source.NATIVE) return@post
+            val list = queue.value
+            if (nativeErrorStreak++ >= 2 || list.size <= 1) {
+                toast("播放失败：$msg")
+                _state.value = _state.value.copy(playing = false)
+                return@post
+            }
+            // 直链过期之类：直接试下一首，别卡死在这里
+            playNativeIndex(queueIndex.value + 1)
+        }
+    }
+
+    /** 原生模式下切歌：自己解析直链，不去动用户的页面 */
+    private fun playNativeIndex(index: Int) {
+        val list = queue.value
+        if (list.isEmpty()) return
+        val idx = ((index % list.size) + list.size) % list.size
+        queueIndex.value = idx
+        refresh()
+        val song = list[idx]
+        if (nativeAudio == null) {
+            toast("原生播放器还没就绪")
+            return
+        }
+        if (song.id.isBlank()) {
+            toast("《${song.title}》没有歌曲 id，解析不了")
+            return
+        }
+        toast("正在解析《${song.title}》…")
+        scope.launch {
+            GbResolver.resolve(song.id)
+                .onSuccess { res ->
+                    val playable = song.copy(
+                        title = res.title.ifBlank { song.title },
+                        artist = res.artist.ifBlank { song.artist },
+                        cover = res.cover.ifBlank { song.cover },
+                        duration = if (res.duration > 0) res.duration else song.duration,
+                        audioUrl = res.url,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                    // 回写队列：下次再轮到它就不用再解析一次（站点对免费用户有解析次数限制）
+                    queue.value = queue.value.map { if (it.key == playable.key) playable else it }
+                    _state.value = _state.value.copy(
+                        song = playable,
+                        playing = true,
+                        position = 0,
+                        duration = playable.duration
+                    )
+                    nativeErrorStreak = 0
+                    setSource(Source.NATIVE)
+                    markHistory(playable)
+                    PlaybackService.ensureRunning(app)
+                    nativeAudio?.play(playable.audioUrl, 0)
+                }
+                .onFailure { e ->
+                    toast("解析失败：${e.message}")
+                    _state.value = _state.value.copy(playing = false)
+                }
+        }
     }
 
     fun cycleQueueMode(): QueueMode {
@@ -315,6 +572,12 @@ object PlayerHub {
             if (forcePlay) run("window.__gb && __gb.play()")
             return
         }
+        // 主动切歌：原生那一份先让位，别和马上要开嗓的网页一起响
+        if (source == Source.NATIVE) {
+            nativeAudio?.stop()
+            setSource(Source.WEB)
+        }
+        suppressHandoff = true
         if (forcePlay) pendingAutoplay.set(true)
         navigate(song.page())
     }
@@ -322,7 +585,10 @@ object PlayerHub {
     /** 歌曲页加载完成后，若队列正指向这首歌则自动开播（配合 consumeAutoplay 使用，此处仅兜底刷新 UI） */
     fun onPageLoaded(url: String) {
         setWebUrl(url)
-        main.post { refresh() }
+        main.post {
+            suppressHandoff = false   // 兜底：万一这次跳转没走 onPageStarted，别把标记漏到下一次
+            refresh()
+        }
     }
 
     fun toggleFavoriteCurrent(): Boolean {
@@ -333,6 +599,15 @@ object PlayerHub {
     }
 
     fun currentSong(): Song? = _state.value.song
+
+    /** 用站点自己的接口现解析一个直链（下载、原生切歌都用得上），结果回主线程 */
+    fun resolveUrl(song: Song, onResult: (Result<GbResolver.Resolved>) -> Unit) {
+        if (song.id.isBlank()) {
+            main.post { onResult(Result.failure(GbResolver.ResolveException("这首歌没有 id，解析不了"))) }
+            return
+        }
+        scope.launch { onResult(GbResolver.resolve(song.id)) }
+    }
 
     fun clearQueue() {
         queue.value = emptyList()

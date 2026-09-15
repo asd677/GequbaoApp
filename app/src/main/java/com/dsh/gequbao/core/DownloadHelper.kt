@@ -67,7 +67,11 @@ object DownloadHelper {
 
         val ua = userAgent ?: WebSettings.getDefaultUserAgent(context)
         request.addRequestHeader("User-Agent", ua)
-        request.addRequestHeader("Referer", pageUrl ?: SITE)
+        // Referer 只给本站的地址：直链（酷我 CDN 之类）带了 Referer 会直接 403（实测）
+        val host = runCatching { Uri.parse(url).host.orEmpty() }.getOrDefault("")
+        if (host.endsWith("gequbao.com")) {
+            request.addRequestHeader("Referer", pageUrl ?: SITE)
+        }
         val ck = cookie ?: CookieManager.getInstance().getCookie(url)
         if (!ck.isNullOrBlank()) request.addRequestHeader("Cookie", ck)
         val mime = mimeType?.takeIf { it.isNotBlank() } ?: guessMime(url)
